@@ -5,11 +5,13 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response, Cookie
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 import os
 from pathlib import Path
+import json
+import secrets
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -77,6 +79,54 @@ activities = {
     }
 }
 
+# 会话存储（简单内存实现，生产环境应使用数据库或Redis）
+sessions = {}
+
+TEACHERS_FILE = os.path.join(current_dir, "teachers.json")
+
+# 工具函数：校验教师账号
+def check_teacher_credentials(username, password):
+    try:
+        with open(TEACHERS_FILE, "r") as f:
+            teachers = json.load(f)
+        for t in teachers:
+            if t["username"] == username and t["password"] == password:
+                return True
+    except Exception:
+        pass
+    return False
+
+# 登录接口
+@app.post("/login")
+def login(username: str, password: str, response: Response):
+    if check_teacher_credentials(username, password):
+        session_token = secrets.token_hex(16)
+        sessions[session_token] = username
+        response.set_cookie(key="session_token", value=session_token, httponly=True)
+        return {"message": "Login successful", "role": "teacher"}
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+# 登出接口
+@app.post("/logout")
+def logout(response: Response, session_token: str = Cookie(None)):
+    if session_token and session_token in sessions:
+        del sessions[session_token]
+    response.delete_cookie(key="session_token")
+    return {"message": "Logged out"}
+
+# 权限校验装饰器
+from functools import wraps
+
+def teacher_required(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        request: Request = kwargs.get("request")
+        session_token = request.cookies.get("session_token") if request else None
+        if not session_token or session_token not in sessions:
+            raise HTTPException(status_code=403, detail="Teacher login required")
+        return await func(*args, **kwargs)
+    return wrapper
+
 
 @app.get("/")
 def root():
@@ -88,8 +138,10 @@ def get_activities():
     return activities
 
 
+# 修改报名和退选接口，仅教师可操作
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+@teacher_required
+def signup_for_activity(activity_name: str, email: str, request: Request):
     """Sign up a student for an activity"""
     # Validate activity exists
     if activity_name not in activities:
@@ -111,7 +163,8 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+@teacher_required
+def unregister_from_activity(activity_name: str, email: str, request: Request):
     """Unregister a student from an activity"""
     # Validate activity exists
     if activity_name not in activities:
